@@ -1,0 +1,49 @@
+import pyodbc
+from pymongo import MongoClient
+from datetime import datetime
+import time
+
+sql_conn = pyodbc.connect(
+    r"DRIVER={SQL Server};"
+    r"SERVER=DESKTOP-LVCUNG7HP\SQLEXPRESS;"
+    r"DATABASE=HighTemp;"
+    r"Trusted_Connection=yes;"
+)
+
+cursor = sql_conn.cursor()
+
+mongo_client = MongoClient(
+    "mongodb://OTAdmin:password@10.100.6.100:27017/admin"
+)
+
+db = mongo_client["HighTemp"]
+collection = db["SQF1_Log"]
+
+last_datetime = None
+
+while True:
+    try:
+        cursor.execute("""
+        SELECT TOP 1 *
+        FROM dbo.SQF1_Log
+        ORDER BY DATE_TIME DESC
+        """)
+
+        columns = [col[0] for col in cursor.description]
+        row = cursor.fetchone()
+
+        if row:
+            document = dict(zip(columns, row))
+
+            current_dt = document["DATE_TIME"]
+
+            if current_dt != last_datetime:
+                collection.insert_one(document)
+                last_datetime = current_dt
+                print(f"Inserted: {current_dt}")
+
+        time.sleep(60)  # 60 seconds
+
+    except Exception as e:
+        print("Error:", e)
+        time.sleep(60)
