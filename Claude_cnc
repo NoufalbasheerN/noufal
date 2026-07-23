@@ -1,79 +1,74 @@
 import ctypes
+import logging
 import os
+import signal
+import sys
 import time
 from datetime import datetime
+
 from pymongo import MongoClient
+from pymongo.errors import PyMongoError
+
+# =====================================================
+# LOGGING  (never os.system("clear") in production —
+# it destroys evidence when something goes wrong)
+# =====================================================
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[
+        logging.FileHandler("fanuc_monitor.log"),
+        logging.StreamHandler(sys.stdout),
+    ],
+)
+log = logging.getLogger("fanuc")
 
 # =====================================================
 # MONGODB
 # =====================================================
 
-MONGO_IP = "10.100.6.100"
-MONGO_PORT = 27017
+MONGO_URI = "mongodb://OTAdmin:vGF44j%23%265K%266@10.100.6.100:27017/admin"
 
-client = MongoClient(
-    f"mongodb://OTAdmin:vGF44j%23%265K%266@10.100.6.100:27017/admin",
-    serverSelectionTimeoutMS=3000
-)
-
-db = client["trace"]
+mongo_client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=3000)
+db = mongo_client["trace"]
 collection = db["Mbd"]
 
 # =====================================================
 # FOCAS LIBRARY
 # =====================================================
 
-LIB_PATH = os.path.expanduser(
-    "~/libfwlib32-linux-x64.so.1.0.5"
-)
+LIB_PATH = os.path.expanduser("~/libfwlib32-linux-x64.so.1.0.5")
+
+if not os.path.exists(LIB_PATH):
+    log.critical(f"FOCAS library not found at {LIB_PATH}")
+    sys.exit(1)
 
 focas = ctypes.CDLL(LIB_PATH)
 
-# =====================================================
-# ARGTYPES / RESTYPE
-# =====================================================
-# Without these, ctypes assumes every argument is a 4-byte C int,
-# but FOCAS handle params are unsigned short (2 bytes). On 64-bit
-# Linux that mismatch corrupts the call and causes intermittent
-# segfaults / garbage struct data. Must be declared explicitly.
+# ---------------------------------------------------------------
+# CRITICAL: declare argtypes/restype for every FOCAS call we use.
+# Without this, ctypes guesses marshaling (defaults to c_int for
+# everything), which is a common source of stack/heap corruption
+# and segfaults when the real C signature differs.
+# ---------------------------------------------------------------
 
-focas.cnc_startupprocess.argtypes = [ctypes.c_int16, ctypes.c_char_p]
-focas.cnc_startupprocess.restype = ctypes.c_int16
+focas.cnc_startupprocess.argtypes = [ctypes.c_long, ctypes.c_char_p]
+focas.cnc_startupprocess.restype = ctypes.c_short
 
 focas.cnc_allclibhndl3.argtypes = [
-    ctypes.c_char_p, ctypes.c_uint16, ctypes.c_int32,
-    ctypes.POINTER(ctypes.c_uint16)
+    ctypes.c_char_p,
+    ctypes.c_ushort,
+    ctypes.c_long,
+    ctypes.POINTER(ctypes.c_ushort),
 ]
-focas.cnc_allclibhndl3.restype = ctypes.c_int16
+focas.cnc_allclibhndl3.restype = ctypes.c_short
 
-focas.cnc_rdmacro.argtypes = [
-    ctypes.c_uint16, ctypes.c_int16, ctypes.c_int16, ctypes.c_void_p
-]
-focas.cnc_rdmacro.restype = ctypes.c_int16
+focas.cnc_freelibhndl.argtypes = [ctypes.c_ushort]
+focas.cnc_freelibhndl.restype = ctypes.c_short
 
-focas.cnc_statinfo.argtypes = [ctypes.c_uint16, ctypes.c_void_p]
-focas.cnc_statinfo.restype = ctypes.c_int16
-
-focas.cnc_rdtimer.argtypes = [
-    ctypes.c_uint16, ctypes.c_int16, ctypes.c_void_p
-]
-focas.cnc_rdtimer.restype = ctypes.c_int16
-
-focas.cnc_freelibhndl.argtypes = [ctypes.c_uint16]
-focas.cnc_freelibhndl.restype = ctypes.c_int16
-
-# =====================================================
-# STARTUP
-# =====================================================
-
-ret = focas.cnc_startupprocess(
-    3,
-    b"focas.log"
-)
-
-if ret != 0:
-    print("FOCAS Startup Error:", ret)
-    exit()
+# forward-declared after struct definitions below
+# (cnc_rdmacro, cnc_statinfo, cnc_rdtimer)
 
 # =====================================================
 # MACHINES
@@ -85,64 +80,170 @@ MACHINES = [
     {"name": "GR-TU-61", "ip": b"10.100.6.117"},
     {"name": "GR-TU-87", "ip": b"10.100.6.24"},
     {"name": "GR-TU-88", "ip": b"10.100.6.25"},
-    {"name": "GR-TU-86", "ip": b"10.100.6.26"}
+    {"name": "GR-TU-86", "ip": b"10.100.6.26"},
 ]
 
 # =====================================================
-# STRUCTURES
+# STRUCTURES  (fixed to match real FOCAS layouts)
 # =====================================================
 
+
 class ODBM(ctypes.Structure):
+    """Used with cnc_rdmacro (macro variable read)."""
     _pack_ = 1
     _fields_ = [
         ("datano", ctypes.c_int16),
         ("dummy", ctypes.c_int16),
         ("mcr_val", ctypes.c_int32),
-        ("dec_val", ctypes.c_int16)
+        ("dec_val", ctypes.c_int16),
     ]
 
+
 class ODBST(ctypes.Structure):
+    """
+    Used with cnc_statinfo.
+
+    FIX: the real FOCAS struct has 9 short fields, not 8.
+    The original code was missing `tmmode`, which made this
+    struct 2 bytes smaller than what cnc_statinfo actually
+    writes -> heap buffer overflow -> segfault.
+    """
     _pack_ = 1
     _fields_ = [
         ("dummy", ctypes.c_short),
+        ("tmmode", ctypes.c_short),
         ("aut", ctypes.c_short),
         ("run", ctypes.c_short),
         ("motion", ctypes.c_short),
         ("mstb", ctypes.c_short),
         ("emergency", ctypes.c_short),
         ("alarm", ctypes.c_short),
-        ("edit", ctypes.c_short)
+        ("edit", ctypes.c_short),
     ]
 
+
 class IODBTIME(ctypes.Structure):
+    """Used with cnc_rdtimer."""
     _pack_ = 1
     _fields_ = [
         ("minute", ctypes.c_int32),
-        ("msec", ctypes.c_int32)
+        ("msec", ctypes.c_int32),
     ]
 
+
+# Now that the structs exist, declare the remaining argtypes.
+
+focas.cnc_rdmacro.argtypes = [
+    ctypes.c_ushort,
+    ctypes.c_short,
+    ctypes.c_short,
+    ctypes.POINTER(ODBM),
+]
+focas.cnc_rdmacro.restype = ctypes.c_short
+
+focas.cnc_statinfo.argtypes = [ctypes.c_ushort, ctypes.POINTER(ODBST)]
+focas.cnc_statinfo.restype = ctypes.c_short
+
+focas.cnc_rdtimer.argtypes = [
+    ctypes.c_ushort,
+    ctypes.c_short,
+    ctypes.POINTER(IODBTIME),
+]
+focas.cnc_rdtimer.restype = ctypes.c_short
+
 # =====================================================
-# CONNECT CNC
+# STARTUP
 # =====================================================
 
-handles = {}
+ret = focas.cnc_startupprocess(3, b"focas.log")
+if ret != 0:
+    log.critical(f"FOCAS Startup Error: {ret}")
+    sys.exit(1)
 
-for machine in MACHINES:
+# =====================================================
+# HELPERS
+# =====================================================
 
+
+def format_timer(minutes, msec):
+    total_seconds = minutes * 60 + (msec // 1000)
+    hh = total_seconds // 3600
+    mm = (total_seconds % 3600) // 60
+    ss = total_seconds % 60
+    return f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+
+def seconds_from_timer(minutes, msec):
+    return minutes * 60 + msec // 1000
+
+
+def hms(total_seconds):
+    hh = total_seconds // 3600
+    mm = (total_seconds % 3600) // 60
+    ss = total_seconds % 60
+    return f"{hh:02d}:{mm:02d}:{ss:02d}"
+
+
+def safe_insert(document):
+    try:
+        collection.insert_one(document)
+        return True
+    except PyMongoError as e:
+        log.error(f"Mongo insert failed: {e}")
+        return False
+
+
+# =====================================================
+# CONNECTION MANAGEMENT (with reconnect support)
+# =====================================================
+
+handles = {}  # machine_name -> ctypes.c_ushort
+
+
+def connect_machine(machine):
     handle = ctypes.c_ushort()
-
-    ret = focas.cnc_allclibhndl3(
-        machine["ip"],
-        8193,
-        10,
-        ctypes.byref(handle)
-    )
-
+    ret = focas.cnc_allclibhndl3(machine["ip"], 8193, 10, ctypes.byref(handle))
     if ret == 0:
         handles[machine["name"]] = handle
-        print(f"{machine['name']} Connected")
+        log.info(f"{machine['name']} Connected")
+        return True
     else:
-        print(f"{machine['name']} Failed : {ret}")
+        log.warning(f"{machine['name']} Connect failed : {ret}")
+        return False
+
+
+def disconnect_all():
+    for name, handle in handles.items():
+        try:
+            focas.cnc_freelibhndl(handle.value)
+        except Exception as e:
+            log.error(f"Error freeing handle for {name}: {e}")
+    handles.clear()
+
+
+for m in MACHINES:
+    connect_machine(m)
+
+
+def shutdown(*_):
+    log.info("Shutting down, releasing FOCAS handles...")
+    disconnect_all()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, shutdown)
+signal.signal(signal.SIGTERM, shutdown)
+
+# =====================================================
+# CYCLE TRACKING STATE
+# =====================================================
+
+previous_state = {m["name"]: "UNKNOWN" for m in MACHINES}
+cycle_start_time = {m["name"]: None for m in MACHINES}
+machine_on_count = {m["name"]: 0 for m in MACHINES}
+machine_off_count = {m["name"]: 0 for m in MACHINES}
+
+RECONNECT_ERROR_CODES = {-16, -8, 3}  # EW_HANDLE / EW_SOCKET / connection-ish errors; adjust to your FOCAS error map
 
 # =====================================================
 # MAIN LOOP
@@ -150,106 +251,130 @@ for machine in MACHINES:
 
 while True:
 
-    os.system("clear")
+    for machine in MACHINES:
 
-    print("=" * 100)
-    print("FANUC PRODUCTION MONITOR (RAW DATA)")
-    print(datetime.now())
-    print("=" * 100)
+        machine_name = machine["name"]
 
-    for machine_name, handle in handles.items():
+        if machine_name not in handles:
+            # Attempt reconnect for any machine that's currently down.
+            connect_machine(machine)
+            if machine_name not in handles:
+                continue
+
+        handle = handles[machine_name]
 
         try:
-
-            # PART COUNT (raw macro values, no decimal adjustment)
-
+            # ---------------- PART COUNT ----------------
             part = ODBM()
-            ret_part = focas.cnc_rdmacro(
-                handle.value,
-                3901,
-                10,
-                ctypes.byref(part)
+            ret = focas.cnc_rdmacro(handle.value, 3901, 10, ctypes.byref(part))
+            part_count = (
+                int(part.mcr_val / (10 ** abs(part.dec_val))) if ret == 0 else -1
             )
 
-            # TARGET COUNT (raw macro values, no decimal adjustment)
-
+            # ---------------- TARGET COUNT ----------------
             target = ODBM()
-            ret_target = focas.cnc_rdmacro(
-                handle.value,
-                3902,
-                10,
-                ctypes.byref(target)
+            ret = focas.cnc_rdmacro(handle.value, 3902, 10, ctypes.byref(target))
+            target_count = (
+                int(target.mcr_val / (10 ** abs(target.dec_val))) if ret == 0 else -1
             )
 
-            # STATUS (raw fields, no derived state)
-
+            # ---------------- STATUS ----------------
             status = ODBST()
-            ret_status = focas.cnc_statinfo(
-                handle.value,
-                ctypes.byref(status)
-            )
+            ret = focas.cnc_statinfo(handle.value, ctypes.byref(status))
+            if ret == 0:
+                machine_state = "RUNNING" if status.motion == 3 else "STOPPED"
+                alarm = status.alarm
+            else:
+                machine_state = "UNKNOWN"
+                alarm = -1
 
-            # TIMERS (raw minute/msec, no formatting)
-
+            # ---------------- TIMERS ----------------
             timer0 = IODBTIME()
-            ret_t0 = focas.cnc_rdtimer(handle.value, 0, ctypes.byref(timer0))
+            ret0 = focas.cnc_rdtimer(handle.value, 0, ctypes.byref(timer0))
+            power_on = format_timer(timer0.minute, timer0.msec) if ret0 == 0 else "NA"
 
             timer1 = IODBTIME()
-            ret_t1 = focas.cnc_rdtimer(handle.value, 1, ctypes.byref(timer1))
+            ret1 = focas.cnc_rdtimer(handle.value, 1, ctypes.byref(timer1))
+            run_time = format_timer(timer1.minute, timer1.msec) if ret1 == 0 else "NA"
 
             timer2 = IODBTIME()
-            ret_t2 = focas.cnc_rdtimer(handle.value, 2, ctypes.byref(timer2))
+            ret2 = focas.cnc_rdtimer(handle.value, 2, ctypes.byref(timer2))
+            cutting_time = (
+                format_timer(timer2.minute, timer2.msec) if ret2 == 0 else "NA"
+            )
 
             timer3 = IODBTIME()
-            ret_t3 = focas.cnc_rdtimer(handle.value, 3, ctypes.byref(timer3))
+            ret3 = focas.cnc_rdtimer(handle.value, 3, ctypes.byref(timer3))
+            cycle_time = (
+                format_timer(timer3.minute, timer3.msec) if ret3 == 0 else "NA"
+            )
 
             current_time = datetime.now()
 
-            # ==================================
-            # RAW DOCUMENT - straight from FOCAS, no calculations
-            # ==================================
+            # ---------------- CYCLE START ----------------
+            if previous_state[machine_name] != "RUNNING" and machine_state == "RUNNING":
+                cycle_start_time[machine_name] = current_time
+                machine_on_count[machine_name] += 1
 
-            document = {
+            # ---------------- CYCLE STOP ----------------
+            elif (
+                previous_state[machine_name] == "RUNNING"
+                and machine_state == "STOPPED"
+            ):
+                machine_off_count[machine_name] += 1
 
-                "timestamp": current_time,
-                "machine_name": machine_name,
+                if cycle_start_time[machine_name]:
+                    cycle_stop_time = current_time
+                    cycle_seconds = int(
+                        (cycle_stop_time - cycle_start_time[machine_name]).total_seconds()
+                    )
+                    actual_cycle_time = hms(cycle_seconds)
 
-                # part / target macros - raw
-                "part_mcr_val": part.mcr_val if ret_part == 0 else None,
-                "part_dec_val": part.dec_val if ret_part == 0 else None,
-                "target_mcr_val": target.mcr_val if ret_target == 0 else None,
-                "target_dec_val": target.dec_val if ret_target == 0 else None,
+                    power_seconds = seconds_from_timer(timer0.minute, timer0.msec) if ret0 == 0 else 0
+                    run_seconds = seconds_from_timer(timer1.minute, timer1.msec) if ret1 == 0 else 0
+                    down_seconds = max(power_seconds - run_seconds, 0)
+                    machine_down_time = hms(down_seconds)
 
-                # status - raw
-                "status_aut": status.aut if ret_status == 0 else None,
-                "status_run": status.run if ret_status == 0 else None,
-                "status_motion": status.motion if ret_status == 0 else None,
-                "status_mstb": status.mstb if ret_status == 0 else None,
-                "status_emergency": status.emergency if ret_status == 0 else None,
-                "status_alarm": status.alarm if ret_status == 0 else None,
-                "status_edit": status.edit if ret_status == 0 else None,
+                    document = {
+                        "timestamp": current_time,
+                        "machine_name": machine_name,
+                        "cycle_start": cycle_start_time[machine_name],
+                        "cycle_stop": cycle_stop_time,
+                        "machine_cycle_time": actual_cycle_time,
+                        "machine_down_time": machine_down_time,
+                        "overall_run_time": run_time,
+                        "total_part_count": part_count,
+                        "ok_part_count": part_count,
+                        "not_ok_part_count": 0,
+                        "machine_on_count": machine_on_count[machine_name],
+                        "machine_off_count": machine_off_count[machine_name],
+                        "target_count": target_count,
+                        "alarm": alarm,
+                    }
 
-                # timers - raw minute/msec
-                "power_on_minute": timer0.minute if ret_t0 == 0 else None,
-                "power_on_msec": timer0.msec if ret_t0 == 0 else None,
+                    if safe_insert(document):
+                        log.info(f"{machine_name} Cycle Saved")
 
-                "run_time_minute": timer1.minute if ret_t1 == 0 else None,
-                "run_time_msec": timer1.msec if ret_t1 == 0 else None,
+            previous_state[machine_name] = machine_state
 
-                "cutting_time_minute": timer2.minute if ret_t2 == 0 else None,
-                "cutting_time_msec": timer2.msec if ret_t2 == 0 else None,
+            log.info(
+                f"[{machine_name}] state={machine_state} part={part_count} "
+                f"target={target_count} alarm={alarm} power_on={power_on} "
+                f"run={run_time} cutting={cutting_time} cycle={cycle_time}"
+            )
 
-                "cycle_time_minute": timer3.minute if ret_t3 == 0 else None,
-                "cycle_time_msec": timer3.msec if ret_t3 == 0 else None,
-            }
-
-            collection.insert_one(document)
-
-            print(f"\n[{machine_name}] Raw data sent to DB")
-            print(document)
+            # If the CNC call returned a connection-level error, drop and
+            # reconnect next cycle rather than keep hammering a dead handle.
+            if ret in RECONNECT_ERROR_CODES:
+                log.warning(f"{machine_name} looks disconnected (ret={ret}), will retry")
+                try:
+                    focas.cnc_freelibhndl(handle.value)
+                except Exception:
+                    pass
+                del handles[machine_name]
 
         except Exception as e:
-
-            print(f"{machine_name} Error : {e}")
+            log.error(f"{machine_name} Error : {e}", exc_info=True)
 
     time.sleep(5)
+            
