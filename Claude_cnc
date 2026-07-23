@@ -1,0 +1,221 @@
+import ctypes
+import os
+import time
+from datetime import datetime
+from pymongo import MongoClient
+
+# =====================================================
+# MONGODB
+# =====================================================
+
+MONGO_IP = "10.100.6.100"
+MONGO_PORT = 27017
+
+client = MongoClient(
+    f"mongodb://OTAdmin:vGF44j%23%265K%266@10.100.6.100:27017/admin",
+    serverSelectionTimeoutMS=3000
+)
+
+db = client["trace"]
+collection = db["Mbd"]
+
+# =====================================================
+# FOCAS LIBRARY
+# =====================================================
+
+LIB_PATH = os.path.expanduser(
+    "~/libfwlib32-linux-x64.so.1.0.5"
+)
+
+focas = ctypes.CDLL(LIB_PATH)
+
+# =====================================================
+# STARTUP
+# =====================================================
+
+ret = focas.cnc_startupprocess(
+    3,
+    b"focas.log"
+)
+
+if ret != 0:
+    print("FOCAS Startup Error:", ret)
+    exit()
+
+# =====================================================
+# MACHINES
+# =====================================================
+
+MACHINES = [
+    {"name": "GR-TU-68", "ip": b"10.100.6.115"},
+    {"name": "GR-TU-67", "ip": b"10.100.6.116"},
+    {"name": "GR-TU-61", "ip": b"10.100.6.117"},
+    {"name": "GR-TU-87", "ip": b"10.100.6.24"},
+    {"name": "GR-TU-88", "ip": b"10.100.6.25"},
+    {"name": "GR-TU-86", "ip": b"10.100.6.26"}
+]
+
+# =====================================================
+# STRUCTURES
+# =====================================================
+
+class ODBM(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("datano", ctypes.c_int16),
+        ("dummy", ctypes.c_int16),
+        ("mcr_val", ctypes.c_int32),
+        ("dec_val", ctypes.c_int16)
+    ]
+
+class ODBST(ctypes.Structure):
+    _fields_ = [
+        ("dummy", ctypes.c_short),
+        ("aut", ctypes.c_short),
+        ("run", ctypes.c_short),
+        ("motion", ctypes.c_short),
+        ("mstb", ctypes.c_short),
+        ("emergency", ctypes.c_short),
+        ("alarm", ctypes.c_short),
+        ("edit", ctypes.c_short)
+    ]
+
+class IODBTIME(ctypes.Structure):
+    _pack_ = 1
+    _fields_ = [
+        ("minute", ctypes.c_int32),
+        ("msec", ctypes.c_int32)
+    ]
+
+# =====================================================
+# CONNECT CNC
+# =====================================================
+
+handles = {}
+
+for machine in MACHINES:
+
+    handle = ctypes.c_ushort()
+
+    ret = focas.cnc_allclibhndl3(
+        machine["ip"],
+        8193,
+        10,
+        ctypes.byref(handle)
+    )
+
+    if ret == 0:
+        handles[machine["name"]] = handle
+        print(f"{machine['name']} Connected")
+    else:
+        print(f"{machine['name']} Failed : {ret}")
+
+# =====================================================
+# MAIN LOOP
+# =====================================================
+
+while True:
+
+    os.system("clear")
+
+    print("=" * 100)
+    print("FANUC PRODUCTION MONITOR (RAW DATA)")
+    print(datetime.now())
+    print("=" * 100)
+
+    for machine_name, handle in handles.items():
+
+        try:
+
+            # PART COUNT (raw macro values, no decimal adjustment)
+
+            part = ODBM()
+            ret_part = focas.cnc_rdmacro(
+                handle.value,
+                3901,
+                10,
+                ctypes.byref(part)
+            )
+
+            # TARGET COUNT (raw macro values, no decimal adjustment)
+
+            target = ODBM()
+            ret_target = focas.cnc_rdmacro(
+                handle.value,
+                3902,
+                10,
+                ctypes.byref(target)
+            )
+
+            # STATUS (raw fields, no derived state)
+
+            status = ODBST()
+            ret_status = focas.cnc_statinfo(
+                handle.value,
+                ctypes.byref(status)
+            )
+
+            # TIMERS (raw minute/msec, no formatting)
+
+            timer0 = IODBTIME()
+            ret_t0 = focas.cnc_rdtimer(handle.value, 0, ctypes.byref(timer0))
+
+            timer1 = IODBTIME()
+            ret_t1 = focas.cnc_rdtimer(handle.value, 1, ctypes.byref(timer1))
+
+            timer2 = IODBTIME()
+            ret_t2 = focas.cnc_rdtimer(handle.value, 2, ctypes.byref(timer2))
+
+            timer3 = IODBTIME()
+            ret_t3 = focas.cnc_rdtimer(handle.value, 3, ctypes.byref(timer3))
+
+            current_time = datetime.now()
+
+            # ==================================
+            # RAW DOCUMENT - straight from FOCAS, no calculations
+            # ==================================
+
+            document = {
+
+                "timestamp": current_time,
+                "machine_name": machine_name,
+
+                # part / target macros - raw
+                "part_mcr_val": part.mcr_val if ret_part == 0 else None,
+                "part_dec_val": part.dec_val if ret_part == 0 else None,
+                "target_mcr_val": target.mcr_val if ret_target == 0 else None,
+                "target_dec_val": target.dec_val if ret_target == 0 else None,
+
+                # status - raw
+                "status_aut": status.aut if ret_status == 0 else None,
+                "status_run": status.run if ret_status == 0 else None,
+                "status_motion": status.motion if ret_status == 0 else None,
+                "status_mstb": status.mstb if ret_status == 0 else None,
+                "status_emergency": status.emergency if ret_status == 0 else None,
+                "status_alarm": status.alarm if ret_status == 0 else None,
+                "status_edit": status.edit if ret_status == 0 else None,
+
+                # timers - raw minute/msec
+                "power_on_minute": timer0.minute if ret_t0 == 0 else None,
+                "power_on_msec": timer0.msec if ret_t0 == 0 else None,
+
+                "run_time_minute": timer1.minute if ret_t1 == 0 else None,
+                "run_time_msec": timer1.msec if ret_t1 == 0 else None,
+
+                "cutting_time_minute": timer2.minute if ret_t2 == 0 else None,
+                "cutting_time_msec": timer2.msec if ret_t2 == 0 else None,
+
+                "cycle_time_minute": timer3.minute if ret_t3 == 0 else None,
+                "cycle_time_msec": timer3.msec if ret_t3 == 0 else None,
+            }
+
+            collection.insert_one(document)
+
+            print(f"\n[{machine_name}] Raw data sent to DB")
+            print(document)
+
+        except Exception as e:
+
+            print(f"{machine_name} Error : {e}")
+
+    time.sleep(5)
