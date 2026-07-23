@@ -30,6 +30,39 @@ LIB_PATH = os.path.expanduser(
 focas = ctypes.CDLL(LIB_PATH)
 
 # =====================================================
+# ARGTYPES / RESTYPE
+# =====================================================
+# Without these, ctypes assumes every argument is a 4-byte C int,
+# but FOCAS handle params are unsigned short (2 bytes). On 64-bit
+# Linux that mismatch corrupts the call and causes intermittent
+# segfaults / garbage struct data. Must be declared explicitly.
+
+focas.cnc_startupprocess.argtypes = [ctypes.c_int16, ctypes.c_char_p]
+focas.cnc_startupprocess.restype = ctypes.c_int16
+
+focas.cnc_allclibhndl3.argtypes = [
+    ctypes.c_char_p, ctypes.c_uint16, ctypes.c_int32,
+    ctypes.POINTER(ctypes.c_uint16)
+]
+focas.cnc_allclibhndl3.restype = ctypes.c_int16
+
+focas.cnc_rdmacro.argtypes = [
+    ctypes.c_uint16, ctypes.c_int16, ctypes.c_int16, ctypes.c_void_p
+]
+focas.cnc_rdmacro.restype = ctypes.c_int16
+
+focas.cnc_statinfo.argtypes = [ctypes.c_uint16, ctypes.c_void_p]
+focas.cnc_statinfo.restype = ctypes.c_int16
+
+focas.cnc_rdtimer.argtypes = [
+    ctypes.c_uint16, ctypes.c_int16, ctypes.c_void_p
+]
+focas.cnc_rdtimer.restype = ctypes.c_int16
+
+focas.cnc_freelibhndl.argtypes = [ctypes.c_uint16]
+focas.cnc_freelibhndl.restype = ctypes.c_int16
+
+# =====================================================
 # STARTUP
 # =====================================================
 
@@ -69,6 +102,7 @@ class ODBM(ctypes.Structure):
     ]
 
 class ODBST(ctypes.Structure):
+    _pack_ = 1
     _fields_ = [
         ("dummy", ctypes.c_short),
         ("aut", ctypes.c_short),
