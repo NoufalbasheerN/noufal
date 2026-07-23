@@ -1,0 +1,16 @@
+import pyodbc
+
+conn = pyodbc.connect(
+    "DRIVER={SQL Server};"
+    "SERVER=DESKTOP-LVCUNG7\\SQLEXPRESS;"
+    "DATABASE=HighTemp;"
+    "Trusted_Connection=yes;"
+)
+
+cursor = conn.cursor()
+
+cursor.execute("SELECT TOP 1 * FROM dbo.SQF1_Log ORDER BY DATE_TIME DESC")
+
+row = cursor.fetchone()
+
+print(row)
