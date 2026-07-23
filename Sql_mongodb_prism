@@ -1,0 +1,100 @@
+import pyodbc
+from pymongo import MongoClient
+import time
+
+# ===========================
+# SQL Server Connection
+# ===========================
+sql_conn = pyodbc.connect(
+    "DRIVER={SQL Server};"
+    "SERVER=DESKTOP-LVCUNG7\\SQLEXPRESS;"
+    "DATABASE=HighTemp;"
+    "Trusted_Connection=yes;"
+)
+
+cursor = sql_conn.cursor()
+
+# ===========================
+# MongoDB Connection
+# ===========================
+mongo_client = MongoClient(
+    "mongodb://python_admin:LGBchnpythonPass2026@192.168.121.219:27017/LGB_DB?authSource=LGB_DB"
+)
+
+db = mongo_client["trace"]
+collection = db["sqf_data"]
+
+# ===========================
+# Configuration
+# ===========================
+TOPIC = "factory/opcua/SQF3"
+SERVER = "MODBUS_TCP"
+
+last_datetime = None
+
+# Columns to publish
+TAGS = [
+    "FURNACE_TEMP_PV",
+    "FURNACE_TEMP_SP",
+    "FURNACE_CP_PV",
+    "FURNACE_CP_SP",
+    "AGIT_SPEED_PV",
+    "AGIT_SPEED_SP",
+    "AGIT_IDEAL_SP",
+    "OIL_TEMP_L_PV",
+    "OIL_TEMP_R_PV",
+    "OIL_TEMP_SP",
+    "QUENCH_DLY",
+    "F_RPM",
+    "A1_RPM",
+    "A2_RPM"
+]
+
+print("Monitoring SQL Server...")
+
+while True:
+    try:
+
+        cursor.execute("""
+            SELECT TOP 1 *
+            FROM dbo.SQF1_Log
+            ORDER BY DATE_TIME DESC
+        """)
+
+        columns = [column[0] for column in cursor.description]
+        row = cursor.fetchone()
+
+        if row:
+
+            data = dict(zip(columns, row))
+            current_dt = data["DATE_TIME"]
+
+            if current_dt != last_datetime:
+
+                for tag in TAGS:
+
+                    if tag not in data:
+                        continue
+
+                    mongo_doc = {
+                        "topic": TOPIC,
+                        "message": {
+                            "server": SERVER,
+                            "name": tag,
+                            "node_id": "",
+                            "value": data[tag],
+                            "timestamp": current_dt.timestamp(),
+                            "timestamp_ist": current_dt.isoformat()
+                        }
+                    }
+
+                    collection.insert_one(mongo_doc)
+                    print(f"Inserted -> {tag} : {data[tag]}")
+
+                last_datetime = current_dt
+
+        time.sleep(60)
+
+    except Exception as e:
+        print("Error:", e)
+        time.sleep(60)
