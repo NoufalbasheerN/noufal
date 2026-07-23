@@ -14,3 +14,38 @@ cursor.execute("SELECT TOP 1 * FROM dbo.SQF1_Log ORDER BY DATE_TIME DESC")
 row = cursor.fetchone()
 
 print(row)
+
+
+
+
+
+
+
+focas.cnc_allclibhndl3.argtypes = [
+    ctypes.c_char_p,
+    ctypes.c_ushort,
+    ctypes.c_int,
+    ctypes.POINTER(ctypes.c_ushort)
+]
+focas.cnc_allclibhndl3.restype = ctypes.c_short
+
+focas.cnc_rdmacro.argtypes = [
+    ctypes.c_ushort,
+    ctypes.c_short,
+    ctypes.c_short,
+    ctypes.c_void_p
+]
+focas.cnc_rdmacro.restype = ctypes.c_short
+
+focas.cnc_statinfo.argtypes = [
+    ctypes.c_ushort,
+    ctypes.c_void_p
+]
+focas.cnc_statinfo.restype = ctypes.c_short
+
+focas.cnc_rdtimer.argtypes = [
+    ctypes.c_ushort,
+    ctypes.c_short,
+    ctypes.c_void_p
+]
+focas.cnc_rdtimer.restype = ctypes.c_short
