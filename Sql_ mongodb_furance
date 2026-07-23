@@ -4,20 +4,20 @@ from datetime import datetime
 import time
 
 sql_conn = pyodbc.connect(
-    r"DRIVER={SQL Server};"
-    r"SERVER=DESKTOP-LVCUNG7HP\SQLEXPRESS;"
-    r"DATABASE=HighTemp;"
-    r"Trusted_Connection=yes;"
+    "DRIVER={SQL Server};"
+    "SERVER=DESKTOP-LVCUNG7\\SQLEXPRESS;"
+    "DATABASE=HighTemp;"
+    "Trusted_Connection=yes;"
 )
 
 cursor = sql_conn.cursor()
 
 mongo_client = MongoClient(
-    "mongodb://OTAdmin:password@10.100.6.100:27017/admin"
+    "mongodb://python_admin:LGBchnpythonPass2026@192.168.121.219:27017/LGB_DB?authSource=LGB_DB"
 )
 
-db = mongo_client["HighTemp"]
-collection = db["SQF1_Log"]
+db = mongo_client["trace"]
+collection = db["sqf_data"]
 
 last_datetime = None
 
