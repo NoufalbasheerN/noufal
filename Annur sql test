@@ -1,0 +1,34 @@
+import pyodbc
+
+SERVER = "150.153.3.63,55792"
+DATABASE = "SiemensTable"
+
+try:
+    conn = pyodbc.connect(
+        "DRIVER={ODBC Driver 18 for SQL Server};"
+        f"SERVER={SERVER};"
+        f"DATABASE={DATABASE};"
+        "Trusted_Connection=yes;"
+        "TrustServerCertificate=yes;"
+        "Encrypt=no;"
+    )
+
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT TOP 10 * FROM dbo.IMPORTANT")
+
+    columns = [column[0] for column in cursor.description]
+
+    print("Columns:")
+    print(columns)
+
+    print("\nData:")
+    for row in cursor.fetchall():
+        print(row)
+
+    cursor.close()
+    conn.close()
+
+except Exception as e:
+    print("Connection Error:")
+    print(e)
