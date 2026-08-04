@@ -1,14 +1,15 @@
-curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+sudo apt update
+sudo apt install -y curl gnupg2 ca-certificates
 
-curl https://packages.microsoft.com/config/ubuntu/24.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | \
+sudo gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg
+
+echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/24.04/prod noble main" | \
+sudo tee /etc/apt/sources.list.d/mssql-release.list
 
 sudo apt update
 
 sudo ACCEPT_EULA=Y apt install -y msodbcsql18
-
-
-
-
 
 
 
