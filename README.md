@@ -1,3 +1,19 @@
+curl https://packages.microsoft.com/keys/microsoft.asc | sudo apt-key add -
+
+curl https://packages.microsoft.com/config/ubuntu/24.04/prod.list | sudo tee /etc/apt/sources.list.d/mssql-release.list
+
+sudo apt update
+
+sudo ACCEPT_EULA=Y apt install -y msodbcsql18
+
+
+
+
+
+
+
+
+
 # noufal
 scp "C:\Users\Admin\Downloads\fwlib-master\fwlib-master\libfwlib32-linux-x64.so.1.0.5" lgb_iot_team@10.100.6.100:/home/lgb_iot_team/
 
