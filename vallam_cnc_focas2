@@ -1,0 +1,1081 @@
+import ctypes
+import multiprocessing
+import os
+import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+# =====================================================
+# MACHINE CONFIGURATION
+#
+# ADD NEW MACHINES HERE IN FUTURE.
+# =====================================================
+MACHINES = [
+    {
+        "name": "VTD-TU10",
+        "ip": "192.168.121.214",
+    },
+    {
+        "name": "VTD-TU09",
+        "ip": "192.168.121.213",
+    },
+    {
+        "name": "VTD-TU08",
+        "ip": "192.168.121.212",
+    },
+    {
+        "name": "VTD-TU07",
+        "ip": "192.168.121.211",
+    },
+]
+
+
+# =====================================================
+# FOCAS CONFIGURATION
+# =====================================================
+FOCAS_PORT = 8193
+FOCAS_TIMEOUT = 10
+
+# Read each machine every 1 second.
+# MongoDB is NOT written every second.
+POLL_INTERVAL = 1
+
+
+# =====================================================
+# DOWNTIME CONFIGURATION
+# =====================================================
+# If no completed production cycle occurs for
+# 10 minutes, the no-cycle period becomes downtime.
+DOWNTIME_THRESHOLD_SECONDS = 10 * 60
+
+
+# =====================================================
+# TIMEZONE
+# =====================================================
+IST = ZoneInfo("Asia/Kolkata")
+
+UTC = ZoneInfo("UTC")
+
+
+# =====================================================
+# MONGODB CONFIGURATION
+# =====================================================
+MONGO_URI = "mongodb://python_admin:LGBchnpythonPass2026@192.168.121.219:27017/LGB_DB?authSource=LGB_DB"
+MONGO_DB = "trace"
+MONGO_COLLECTION = "Mbd"
+
+
+# =====================================================
+# FOCAS LIBRARY
+# =====================================================
+LIB_PATH = os.path.expanduser("~/libfwlib32-linux-x64.so.1.0.5")
+
+
+# =====================================================
+# FOCAS STRUCTURES
+# =====================================================
+class ODBM(ctypes.Structure):
+
+    _pack_ = 1
+
+    _fields_ = [
+        ("datano", ctypes.c_int16),
+        ("dummy", ctypes.c_int16),
+        ("mcr_val", ctypes.c_int32),
+        ("dec_val", ctypes.c_int16),
+    ]
+
+
+class ODBST(ctypes.Structure):
+
+    _fields_ = [
+        ("dummy", ctypes.c_short),
+        ("aut", ctypes.c_short),
+        ("run", ctypes.c_short),
+        ("motion", ctypes.c_short),
+        ("mstb", ctypes.c_short),
+        ("emergency", ctypes.c_short),
+        ("alarm", ctypes.c_short),
+        ("edit", ctypes.c_short),
+    ]
+
+
+class IODBTIME(ctypes.Structure):
+
+    _pack_ = 1
+
+    _fields_ = [
+        ("minute", ctypes.c_int32),
+        ("msec", ctypes.c_int32),
+    ]
+
+
+# =====================================================
+# FORMAT FOCAS TIMER
+# =====================================================
+def format_timer(
+    minutes,
+    msec,
+):
+
+    total_seconds = (int(minutes) * 60) + (int(msec) // 1000)
+
+    hours = total_seconds // 3600
+
+    remaining_minutes = (total_seconds % 3600) // 60
+
+    seconds = total_seconds % 60
+
+    return f"{hours:02d}:" f"{remaining_minutes:02d}:" f"{seconds:02d}"
+
+
+# =====================================================
+# FORMAT SECONDS
+# =====================================================
+def format_seconds(
+    total_seconds,
+):
+
+    total_seconds = max(0, int(total_seconds))
+
+    hours = total_seconds // 3600
+
+    minutes = (total_seconds % 3600) // 60
+
+    seconds = total_seconds % 60
+
+    return f"{hours:02d}:" f"{minutes:02d}:" f"{seconds:02d}"
+
+
+# =====================================================
+# CONVERT FANUC MACRO VALUE
+# =====================================================
+def convert_macro_value(
+    mcr_val,
+    dec_val,
+):
+
+    if dec_val >= 0:
+
+        value = mcr_val / (10**dec_val)
+
+    else:
+
+        value = mcr_val * (10 ** abs(dec_val))
+
+    return int(value)
+
+
+# =====================================================
+# CURRENT IST
+# =====================================================
+def ist_now():
+
+    return datetime.now(IST)
+
+
+# =====================================================
+# FORMAT IST
+# =====================================================
+def ist_string(
+    value,
+):
+
+    return value.strftime("%Y-%m-%d %H:%M:%S")
+
+
+# =====================================================
+# MONGODB WRITER PROCESS
+#
+# ONLY THIS PROCESS USES PYMONGO.
+# =====================================================
+def mongodb_writer(
+    data_queue,
+):
+
+    from pymongo import MongoClient
+
+    client = None
+    collection = None
+
+    while True:
+
+        try:
+
+            # =================================================
+            # CONNECT MONGODB
+            # =================================================
+            if client is None:
+
+                try:
+
+                    client = MongoClient(
+                        MONGO_URI,
+                        serverSelectionTimeoutMS=5000,
+                        connectTimeoutMS=5000,
+                        socketTimeoutMS=5000,
+                    )
+
+                    client.admin.command("ping")
+
+                    db = client[MONGO_DB]
+
+                    collection = db[MONGO_COLLECTION]
+
+                except Exception as e:
+
+                    print(
+                        "[MONGODB] Connection error:",
+                        e,
+                    )
+
+                    if client is not None:
+
+                        try:
+
+                            client.close()
+
+                        except Exception:
+
+                            pass
+
+                    client = None
+                    collection = None
+
+                    time.sleep(5)
+
+                    continue
+
+            # =================================================
+            # WAIT FOR CYCLE DATA
+            # =================================================
+            document = data_queue.get()
+
+            # Shutdown signal.
+            if document is None:
+
+                break
+
+            # =================================================
+            # INSERT CYCLE
+            # =================================================
+            try:
+
+                result = collection.insert_one(document)
+                print(
+                    f"[SUCCESS] {document['machine_name']} "
+                    f"data saved to MongoDB successfully"
+                )
+            except Exception as e:
+
+                try:
+
+                    client.close()
+
+                except Exception:
+
+                    pass
+
+                client = None
+                collection = None
+
+                # ---------------------------------------------
+                # Retry this document later.
+                # ---------------------------------------------
+                try:
+
+                    data_queue.put(
+                        document,
+                        timeout=1,
+                    )
+
+                except Exception:
+
+                    pass
+
+                time.sleep(5)
+
+        except KeyboardInterrupt:
+
+            break
+
+        except Exception as e:
+
+            time.sleep(5)
+
+    # =================================================
+    # CLOSE MONGODB
+    # =================================================
+    if client is not None:
+
+        try:
+
+            client.close()
+
+        except Exception:
+
+            pass
+
+
+# =====================================================
+# FOCAS COLLECTOR
+#
+# ONE SEPARATE PROCESS IS CREATED FOR EACH MACHINE.
+# =====================================================
+def focas_collector(
+    machine,
+    data_queue,
+):
+
+    machine_name = machine["name"]
+
+    machine_ip_string = machine["ip"]
+
+    machine_ip = machine_ip_string.encode("ascii")
+
+    # =================================================
+    # LOAD FOCAS ONLY INSIDE THIS MACHINE PROCESS
+    # =================================================
+    focas = ctypes.CDLL(LIB_PATH)
+
+    # =================================================
+    # FOCAS FUNCTION DEFINITIONS
+    # =================================================
+    focas.cnc_allclibhndl3.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_ushort,
+        ctypes.c_long,
+        ctypes.POINTER(ctypes.c_ushort),
+    ]
+
+    focas.cnc_allclibhndl3.restype = ctypes.c_short
+
+    focas.cnc_freelibhndl.argtypes = [ctypes.c_ushort]
+
+    focas.cnc_freelibhndl.restype = ctypes.c_short
+
+    focas.cnc_rdmacro.argtypes = [
+        ctypes.c_ushort,
+        ctypes.c_short,
+        ctypes.c_short,
+        ctypes.c_void_p,
+    ]
+
+    focas.cnc_rdmacro.restype = ctypes.c_short
+
+    focas.cnc_statinfo.argtypes = [
+        ctypes.c_ushort,
+        ctypes.c_void_p,
+    ]
+
+    focas.cnc_statinfo.restype = ctypes.c_short
+
+    focas.cnc_rdtimer.argtypes = [
+        ctypes.c_ushort,
+        ctypes.c_short,
+        ctypes.c_void_p,
+    ]
+
+    focas.cnc_rdtimer.restype = ctypes.c_short
+
+    # =================================================
+    # START FOCAS
+    # =================================================
+    log_file = (f"focas_{machine_name}.log").encode()
+
+    ret = focas.cnc_startupprocess(
+        3,
+        log_file,
+    )
+
+    if ret != 0:
+
+        return
+
+    handle = None
+
+    # =================================================
+    # CONNECT
+    # =================================================
+    def connect():
+
+        nonlocal handle
+
+        new_handle = ctypes.c_ushort()
+
+        ret = focas.cnc_allclibhndl3(
+            machine_ip,
+            FOCAS_PORT,
+            FOCAS_TIMEOUT,
+            ctypes.byref(new_handle),
+        )
+
+        if ret == 0:
+
+            handle = new_handle
+
+            return True
+
+        handle = None
+
+        return False
+
+    # =================================================
+    # DISCONNECT
+    # =================================================
+    def disconnect():
+
+        nonlocal handle
+
+        if handle is None:
+
+            return
+
+        try:
+
+            focas.cnc_freelibhndl(handle.value)
+
+        except Exception:
+
+            pass
+
+        handle = None
+
+    # =================================================
+    # READ MACRO
+    # =================================================
+    def read_macro(
+        macro_number,
+    ):
+
+        data = ODBM()
+
+        ret = focas.cnc_rdmacro(
+            handle.value,
+            macro_number,
+            ctypes.sizeof(ODBM),
+            ctypes.byref(data),
+        )
+
+        if ret != 0:
+
+            raise RuntimeError(f"cnc_rdmacro " f"{macro_number} " f"failed: {ret}")
+
+        return convert_macro_value(
+            data.mcr_val,
+            data.dec_val,
+        )
+
+    # =================================================
+    # READ STATUS
+    # =================================================
+    def read_status():
+
+        status = ODBST()
+
+        ret = focas.cnc_statinfo(
+            handle.value,
+            ctypes.byref(status),
+        )
+
+        if ret != 0:
+
+            raise RuntimeError(f"cnc_statinfo " f"failed: {ret}")
+
+        # ---------------------------------------------
+        # Keep the status logic that worked
+        # in your existing script.
+        # ---------------------------------------------
+        if status.motion == 3:
+
+            state = "RUNNING"
+
+        else:
+
+            state = "STOPPED"
+
+        return (
+            state,
+            int(status.alarm),
+        )
+
+    # =================================================
+    # READ TIMER
+    # =================================================
+    def read_timer(
+        timer_number,
+    ):
+
+        timer = IODBTIME()
+
+        ret = focas.cnc_rdtimer(
+            handle.value,
+            timer_number,
+            ctypes.byref(timer),
+        )
+
+        if ret != 0:
+
+            raise RuntimeError(f"cnc_rdtimer " f"{timer_number} " f"failed: {ret}")
+
+        return format_timer(
+            timer.minute,
+            timer.msec,
+        )
+
+    # =================================================
+    # MACHINE-SPECIFIC STATE
+    #
+    # Every process has its own copy of these.
+    # =================================================
+    previous_state = None
+
+    previous_part_count = None
+
+    cycle_active = False
+
+    cycle_start = None
+
+    cycle_start_part_count = None
+
+    last_running_cycle_time = "00:00:00"
+
+    # =================================================
+    # ON/OFF COUNTERS
+    # =================================================
+    machine_on_count = 0
+
+    machine_off_count = 0
+
+    # =================================================
+    # DOWNTIME TRACKING
+    # =================================================
+    no_cycle_since = None
+
+    downtime_active = False
+
+    # =================================================
+    # MAIN MACHINE LOOP
+    # =================================================
+    try:
+
+        while True:
+
+            # =============================================
+            # CONNECT
+            # =============================================
+            if handle is None:
+
+                if not connect():
+
+                    time.sleep(5)
+
+                    continue
+
+            try:
+
+                # =========================================
+                # PART COUNT
+                # =========================================
+                total_part_count = read_macro(3901)
+
+                # =========================================
+                # TARGET COUNT
+                # =========================================
+                target_count = read_macro(3902)
+
+                # =========================================
+                # MACHINE STATUS
+                # =========================================
+                state, alarm = read_status()
+
+                # =========================================
+                # TIMER 0
+                # POWER ON
+                # =========================================
+                power_on = read_timer(0)
+
+                # =========================================
+                # TIMER 1
+                # OVERALL RUN TIME
+                # =========================================
+                overall_run_time = read_timer(1)
+
+                # =========================================
+                # TIMER 2
+                # CUTTING TIME
+                # =========================================
+                cutting_time = read_timer(2)
+
+                # =========================================
+                # TIMER 3
+                # CYCLE TIME
+                # =========================================
+                current_cycle_time = read_timer(3)
+
+                # =========================================
+                # CURRENT IST TIME
+                # =========================================
+                current_time = ist_now()
+
+                # =========================================
+                # INITIAL READING
+                # =========================================
+                if previous_state is None:
+
+                    previous_state = state
+
+                    previous_part_count = total_part_count
+
+                    # -------------------------------------
+                    # Start downtime monitoring.
+                    # -------------------------------------
+                    if no_cycle_since is None:
+
+                        no_cycle_since = current_time
+
+                    if state == "RUNNING":
+
+                        cycle_active = True
+
+                        cycle_start = current_time
+
+                        cycle_start_part_count = total_part_count
+
+                        last_running_cycle_time = current_cycle_time
+
+                        machine_on_count += 1
+
+                    else:
+
+                        time.sleep(POLL_INTERVAL)
+
+                    continue
+
+                # =========================================
+                # CHECK 10-MINUTE DOWNTIME
+                # =========================================
+                if no_cycle_since is not None:
+
+                    seconds_without_cycle = (
+                        current_time - no_cycle_since
+                    ).total_seconds()
+
+                    if seconds_without_cycle >= DOWNTIME_THRESHOLD_SECONDS:
+
+                        if not downtime_active:
+
+                            downtime_active = True
+
+                # =========================================
+                # STOPPED -> RUNNING
+                #
+                # CYCLE START
+                # =========================================
+                if previous_state == "STOPPED" and state == "RUNNING":
+
+                    machine_on_count += 1
+
+                    cycle_active = True
+
+                    cycle_start = current_time
+
+                    cycle_start_part_count = total_part_count
+
+                    last_running_cycle_time = current_cycle_time
+
+                # =========================================
+                # MACHINE RUNNING
+                # =========================================
+                if state == "RUNNING":
+
+                    last_running_cycle_time = current_cycle_time
+
+                    # -------------------------------------
+                    # Safety recovery.
+                    # -------------------------------------
+                    if not cycle_active:
+
+                        cycle_active = True
+
+                        cycle_start = current_time
+
+                        cycle_start_part_count = total_part_count
+
+                        machine_on_count += 1
+
+                # =========================================
+                # RUNNING -> STOPPED
+                # =========================================
+                if previous_state == "RUNNING" and state == "STOPPED":
+
+                    machine_off_count += 1
+
+                    cycle_stop = current_time
+
+                    # =====================================
+                    # CHECK VALID PART COMPLETION
+                    # =====================================
+                    part_completed = (
+                        cycle_active
+                        and cycle_start_part_count is not None
+                        and total_part_count > cycle_start_part_count
+                    )
+
+                    # =====================================
+                    # VALID COMPLETED CYCLE
+                    # =====================================
+                    if part_completed:
+
+                        # =================================
+                        # DOWNTIME CALCULATION
+                        # =================================
+                        machine_down_seconds = 0
+
+                        if downtime_active and no_cycle_since is not None:
+
+                            # ---------------------------------
+                            # Entire no-cycle period is
+                            # considered downtime after the
+                            # 10-minute threshold is reached.
+                            # ---------------------------------
+                            machine_down_seconds = (
+                                cycle_start - no_cycle_since
+                            ).total_seconds()
+
+                            machine_down_seconds = max(0, machine_down_seconds)
+
+                        machine_down_time = format_seconds(machine_down_seconds)
+
+                        # =================================
+                        # UTC TIMESTAMPS
+                        # =================================
+                        cycle_start_utc = cycle_start.astimezone(UTC)
+
+                        cycle_stop_utc = cycle_stop.astimezone(UTC)
+
+                        # =================================
+                        # FINAL MONGODB DOCUMENT
+                        # =================================
+                        cycle_document = {
+                            # -----------------------------
+                            # MAIN TIMESTAMP UTC
+                            # -----------------------------
+                            "timestamp": (cycle_stop_utc),
+                            # -----------------------------
+                            # MACHINE
+                            # -----------------------------
+                            "machine_name": (machine_name),
+                            # -----------------------------
+                            # UTC
+                            # -----------------------------
+                            "cycle_start_utc": (cycle_start_utc),
+                            "cycle_Stop_utc": (cycle_stop_utc),
+                            # -----------------------------
+                            # IST
+                            # -----------------------------
+                            "cycle_start": (ist_string(cycle_start)),
+                            "cycle_stop": (ist_string(cycle_stop)),
+                            # -----------------------------
+                            # CYCLE
+                            # -----------------------------
+                            "machine_cycle_time": (last_running_cycle_time),
+                            # -----------------------------
+                            # DOWNTIME
+                            # -----------------------------
+                            "machine_down_time": (machine_down_time),
+                            # -----------------------------
+                            # OVERALL RUN TIME
+                            # -----------------------------
+                            "overall_run_time": (overall_run_time),
+                            # -----------------------------
+                            # PART COUNTS
+                            # -----------------------------
+                            "total_part_count": (total_part_count),
+                            "ok_part_count": (total_part_count),
+                            "not_ok_part_count": 0,
+                            # -----------------------------
+                            # MACHINE COUNTERS
+                            # -----------------------------
+                            "machine_on_count": (machine_on_count),
+                            "machine_off_count": (machine_off_count),
+                            # -----------------------------
+                            # TARGET
+                            # -----------------------------
+                            "target_count": (target_count),
+                            # -----------------------------
+                            # ALARM
+                            # -----------------------------
+                            "alarm": (alarm),
+                        }
+
+                        # =================================
+                        # SEND TO MONGODB PROCESS
+                        # =================================
+                        try:
+
+                            data_queue.put(
+                                cycle_document,
+                                timeout=2,
+                            )
+
+                        except Exception as e:
+                            pass
+
+                        # =================================
+                        # RESET NO-CYCLE TIMER
+                        #
+                        # Valid production cycle completed.
+                        # =================================
+                        no_cycle_since = cycle_stop
+
+                        downtime_active = False
+
+                    else:
+
+                        # =================================
+                        # STOP WITHOUT PART COMPLETION
+                        # =================================
+                        print(
+                            f"[{machine_name}] "
+                            f"STOP without part completion. "
+                            f"Part={total_part_count}"
+                        )
+
+                        # Do NOT reset no_cycle_since.
+                        # No valid cycle was completed.
+
+                    # =====================================
+                    # RESET CURRENT CYCLE
+                    # =====================================
+                    cycle_active = False
+
+                    cycle_start = None
+
+                    cycle_start_part_count = None
+
+                    last_running_cycle_time = "00:00:00"
+
+                # =========================================
+                # LIVE TERMINAL STATUS
+                # =========================================
+                downtime_display = "NO"
+
+                if downtime_active and no_cycle_since is not None:
+
+                    downtime_display = format_seconds(
+                        (current_time - no_cycle_since).total_seconds()
+                    )
+
+                print(
+                    f"\r"
+                    f"[{machine_name}] "
+                    f"State={state} | "
+                    f"Cycle={current_cycle_time} | "
+                    f"Part={total_part_count} | "
+                    f"Alarm={alarm} | "
+                    f"Downtime={downtime_display}",
+                    end="",
+                    flush=True,
+                )
+
+                # =========================================
+                # UPDATE PREVIOUS VALUES
+                # =========================================
+                previous_state = state
+
+                previous_part_count = total_part_count
+
+                # =========================================
+                # WAIT
+                # =========================================
+                time.sleep(POLL_INTERVAL)
+
+            except Exception as e:
+
+                pass
+                disconnect()
+
+                # -----------------------------------------
+                # Reset current transition state.
+                # -----------------------------------------
+                previous_state = None
+
+                previous_part_count = None
+
+                cycle_active = False
+
+                cycle_start = None
+
+                cycle_start_part_count = None
+
+                last_running_cycle_time = "00:00:00"
+
+                # IMPORTANT:
+                # no_cycle_since is intentionally
+                # preserved.
+
+                time.sleep(3)
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+
+        disconnect()
+
+        try:
+
+            focas.cnc_exitprocess()
+
+        except Exception:
+
+            pass
+
+
+# =====================================================
+# START ONE FOCAS PROCESS FOR A MACHINE
+# =====================================================
+def start_machine_process(
+    machine,
+    data_queue,
+):
+
+    process = multiprocessing.Process(
+        target=focas_collector,
+        args=(
+            machine,
+            data_queue,
+        ),
+        name=(f"FOCAS_" f"{machine['name']}"),
+    )
+
+    process.start()
+
+    return process
+
+
+# =====================================================
+# MAIN
+# =====================================================
+if __name__ == "__main__":
+
+    # =================================================
+    # IMPORTANT:
+    # Use spawn because we're working with a native
+    # FOCAS shared library.
+    # =================================================
+    multiprocessing.set_start_method("spawn")
+
+    # =================================================
+    # SHARED MONGODB QUEUE
+    # =================================================
+    data_queue = multiprocessing.Queue(maxsize=1000)
+
+    # =================================================
+    # START MONGODB WRITER
+    # =================================================
+    mongo_process = multiprocessing.Process(
+        target=mongodb_writer,
+        args=(data_queue,),
+        name="MongoDBWriter",
+    )
+
+    mongo_process.start()
+
+    # =================================================
+    # START ALL MACHINE PROCESSES
+    # =================================================
+    machine_processes = {}
+
+    for machine in MACHINES:
+
+        process = start_machine_process(
+            machine,
+            data_queue,
+        )
+
+        machine_processes[machine["name"]] = {
+            "machine": machine,
+            "process": process,
+        }
+
+    # =================================================
+    # PROCESS MONITOR
+    # =================================================
+    try:
+
+        while True:
+
+            # =========================================
+            # CHECK MONGODB WRITER
+            # =========================================
+            if not mongo_process.is_alive():
+
+                break
+
+            # =========================================
+            # CHECK EACH MACHINE PROCESS
+            # =========================================
+            for machine_name, info in list(machine_processes.items()):
+
+                process = info["process"]
+
+                # -------------------------------------
+                # MACHINE PROCESS CRASHED
+                # -------------------------------------
+                if not process.is_alive():
+
+                    # ---------------------------------
+                    # RESTART ONLY THIS MACHINE
+                    # ---------------------------------
+                    new_process = start_machine_process(
+                        info["machine"],
+                        data_queue,
+                    )
+
+                    machine_processes[machine_name]["process"] = new_process
+
+            time.sleep(5)
+
+    except KeyboardInterrupt:
+        pass
+
+    finally:
+
+        # =================================================
+        # STOP ALL MACHINE PROCESSES
+        # =================================================
+        for machine_name, info in machine_processes.items():
+
+            process = info["process"]
+
+            if process.is_alive():
+
+                process.terminate()
+
+                process.join(timeout=5)
+
+        # =================================================
+        # STOP MONGODB WRITER
+        # =================================================
+        try:
+
+            data_queue.put(
+                None,
+                timeout=1,
+            )
+
+        except Exception:
+
+            pass
+
+        mongo_process.join(timeout=5)
+
+        if mongo_process.is_alive():
+
+            mongo_process.terminate()
+
+            mongo_process.join()
+
+        print("[MAIN] " "Data collection stopped.")
