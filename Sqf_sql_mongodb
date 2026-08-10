@@ -2,21 +2,30 @@ import pyodbc
 from pymongo import MongoClient
 import time
 
+
 # ===========================
 # SQL Server Connection
 # ===========================
+
+SQL_SERVER = "192.168.121.85,1433"
+SQL_DATABASE = "HighTemp"
+
 sql_conn = pyodbc.connect(
-    "DRIVER={SQL Server};"
-    "SERVER=DESKTOP-LVCUNG7\\SQLEXPRESS;"
-    "DATABASE=HighTemp;"
-    "Trusted_Connection=yes;"
+    "DRIVER={ODBC Driver 18 for SQL Server};"
+    f"SERVER={SQL_SERVER};"
+    f"DATABASE={SQL_DATABASE};"
+    "UID=sqluser;"
+    "PWD=Sql@12345;"
+    "TrustServerCertificate=yes;"
 )
 
 cursor = sql_conn.cursor()
 
+
 # ===========================
 # MongoDB Connection
 # ===========================
+
 mongo_client = MongoClient(
     "mongodb://python_admin:LGBchnpythonPass2026@192.168.121.219:27017/LGB_DB?authSource=LGB_DB"
 )
@@ -24,15 +33,21 @@ mongo_client = MongoClient(
 db = mongo_client["trace"]
 collection = db["sqf_data"]
 
+
 # ===========================
 # Configuration
 # ===========================
+
 TOPIC = "factory/opcua/SQF3"
 SERVER = "MODBUS_TCP"
 
 last_datetime = None
 
+
+# ===========================
 # Columns to publish
+# ===========================
+
 TAGS = [
     "FURNACE_TEMP_PV",
     "FURNACE_TEMP_SP",
@@ -50,9 +65,15 @@ TAGS = [
     "A2_RPM"
 ]
 
+
+# ===========================
+# Monitoring
+# ===========================
+
 print("Monitoring SQL Server...")
 
 while True:
+
     try:
 
         cursor.execute("""
@@ -62,18 +83,23 @@ while True:
         """)
 
         columns = [column[0] for column in cursor.description]
+
         row = cursor.fetchone()
 
         if row:
 
             data = dict(zip(columns, row))
+
             current_dt = data["DATE_TIME"]
 
             if current_dt != last_datetime:
 
+                print(f"New record found: {current_dt}")
+
                 for tag in TAGS:
 
                     if tag not in data:
+                        print(f"Column not found: {tag}")
                         continue
 
                     mongo_doc = {
@@ -89,12 +115,23 @@ while True:
                     }
 
                     collection.insert_one(mongo_doc)
-                    print(f"Inserted -> {tag} : {data[tag]}")
+
+                    print(
+                        f"Inserted -> {tag} : {data[tag]}"
+                    )
 
                 last_datetime = current_dt
+
+            else:
+                print(f"No new record: {current_dt}")
+
+        else:
+            print("No records found.")
 
         time.sleep(60)
 
     except Exception as e:
+
         print("Error:", e)
+
         time.sleep(60)
